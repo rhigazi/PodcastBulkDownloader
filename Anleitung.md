@@ -8,6 +8,13 @@ Diese Anleitung erklärt, wie Sie das Tool so einrichten und verwenden, dass es 
 
 Das Tool liest die Podcasts aus einer JSON-Datei. Sie können die Datei im Hauptverzeichnis des Projekts anlegen oder bearbeiten.
 
+### 💡 Tipp: Einfache Konfiguration per Web-Oberfläche
+
+Sie können die Konfiguration ganz einfach visuell über die Weboberfläche **`config_generator.html`** erstellen oder bearbeiten!
+- Öffnen Sie einfach die Datei `config_generator.html` in Ihrem Webbrowser.
+- Fügen Sie eine bestehende JSON-Konfiguration ein oder fügen Sie neue Podcasts über die Benutzeroberfläche hinzu.
+- Klicken Sie auf **Kopieren** oder **Herunterladen**, um Ihre Konfiguration direkt als `my_podcasts.json` zu sichern.
+
 ### Standard-Struktur (Beispiel)
 
 ```json
