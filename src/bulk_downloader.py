@@ -1,4 +1,5 @@
 import datetime
+import json
 import requests
 import os.path
 import logging
@@ -30,6 +31,32 @@ class BulkDownloaderException(Exception):
 def shitty_hoster_url(url) -> bool:
     shitty_hosters = ["acast.com"]
     return any(x in url for x in shitty_hosters)
+
+
+def resolve_apple_podcast(url: str) -> str:
+    """
+    If the url is an Apple Podcasts URL, resolve it to the actual RSS feed URL using the iTunes API.
+    Otherwise, return the original url.
+    """
+    if "podcasts.apple.com" in url:
+        match = re.search(r'/id(\d+)', url)
+        if match:
+            apple_id = match.group(1)
+            lookup_url = f"https://itunes.apple.com/lookup?id={apple_id}"
+            try:
+                # Add User-Agent because some Apple APIs might block generic Python scripts
+                headers = {'User-Agent': f'PodcastBulkDownloader/{pbd_version}'}
+                r = requests.get(lookup_url, headers=headers, timeout=10)
+                if r.status_code == 200:
+                    data = r.json()
+                    if data.get('results'):
+                        feed_url = data['results'][0].get('feedUrl')
+                        if feed_url:
+                            logging.info(f"Resolved Apple Podcast URL {url} to RSS feed: {feed_url}")
+                            return feed_url
+            except Exception as e:
+                logging.warning(f"Failed to resolve Apple Podcast URL {url}: {e}")
+    return url
 
 
 def download_with_resume(url: str, path: str, cb: Callback = None) -> bool:
@@ -197,7 +224,7 @@ class Episode:
 
 class BulkDownloader:
     def __init__(self, url: str, folder: str = None, last_n: int = 0, overwrite: bool = True,
-                 prefix: Prefix = Prefix.NO_PREFIX):
+                 prefix: Prefix = Prefix.NO_PREFIX, last_days: int = 0):
         """
         Constructor of the bulkdownloader
         @param url: URL of the RSS feed or web directory
@@ -205,12 +232,24 @@ class BulkDownloader:
         @param last_n: Only download the last N episodes, all if N = 0
         @param overwrite: Overwrite already downloaded files
         @param prefix: Prefix added for each file name
+        @param last_days: Only download episodes from the last N days, all if N = 0
         """
-        self._url = url
+        self._url = resolve_apple_podcast(url)
         self._folder = folder
         self._last_n = last_n
         self._overwrite = overwrite
         self._prefix = prefix
+        self._last_days = last_days
+
+    def last_days(self, days: int = None):
+        """
+        Set and return the last_days parameter
+        @param days: New last_days value
+        @return: last_days value
+        """
+        if days is not None:
+            self._last_days = days
+        return self._last_days
 
     def last_n(self, n: int = None):
         """
@@ -260,6 +299,8 @@ class BulkDownloader:
             return True
         except URLError as url_error:
             return hasattr(url_error, 'code')
+        except ValueError:
+            return False
 
     def list_mp3(self, cb: Callback = None, verbose: bool = False) -> List[Episode]:
         """
@@ -297,6 +338,19 @@ class BulkDownloader:
         if self._page_is_rss(page):
             logging.info('Processing RSS document')
             to_download = self._get_episodes_to_download_from_rss(page)
+            if self._last_days > 0:
+                now = datetime.datetime.utcnow()
+                cutoff = now - datetime.timedelta(days=self._last_days)
+                filtered = []
+                for ep in to_download:
+                    ep_dt = ep.get_date_time()
+                    if ep_dt is None:
+                        continue
+                    if ep_dt.tzinfo is not None:
+                        ep_dt = ep_dt.replace(tzinfo=None)
+                    if ep_dt >= cutoff:
+                        filtered.append(ep)
+                to_download = filtered
             # We trim the list if needed
             if 0 < self._last_n < len(to_download):
                 to_download = to_download[0:self._last_n]
@@ -401,7 +455,66 @@ class BulkDownloader:
             return False
 
 
-def download_mp3s(url: str, folder: str, last_n: int, overwrite: bool = True, prefix: Prefix = Prefix.NO_PREFIX):
+def get_prefix_from_value(value) -> Prefix:
+    if not value:
+        return None
+    try:
+        return Prefix.from_string(str(value).upper())
+    except ValueError:
+        logging.warning(f"Invalid prefix '{value}' in JSON, ignoring.")
+        return None
+
+
+def process_json_podcasts(json_path: str, base_folder: str, default_last_n: int, default_overwrite: bool, default_prefix: Prefix, default_last_days: int):
+    """
+    Load a JSON file containing podcast definitions and process/download each of them.
+    """
+    logging.info(f"Processing podcasts from JSON file: {json_path}")
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception as e:
+        err_str = f"Failed to read/parse JSON file {json_path}: {e}"
+        logging.error(err_str)
+        raise BulkDownloaderException(err_str)
+
+    podcasts = data.get('podcasts', [])
+    if not podcasts:
+        logging.warning("No podcasts found in the JSON file.")
+        return
+
+    for podcast in podcasts:
+        title = podcast.get('title')
+        url = podcast.get('url')
+        if not title or not url:
+            logging.warning("Skipping podcast entry missing 'title' or 'url'.")
+            continue
+
+        # Option resolving (JSON specific or fallback to default)
+        last_n_val = podcast.get('last_n', podcast.get('last'))
+        last_n = int(last_n_val) if last_n_val is not None else int(default_last_n)
+
+        last_days_val = podcast.get('last_days', podcast.get('days'))
+        last_days = int(last_days_val) if last_days_val is not None else int(default_last_days)
+
+        prefix_val = podcast.get('prefix')
+        prefix = get_prefix_from_value(prefix_val) if prefix_val is not None else default_prefix
+
+        overwrite = podcast.get('overwrite', default_overwrite)
+
+        safe_title = re.sub(r'[\\/:"*?<>|]+', '', title)
+        safe_title = re.sub(' +', ' ', safe_title).strip()
+        subfolder = os.path.normpath(os.path.join(base_folder, safe_title))
+
+        os.makedirs(subfolder, exist_ok=True)
+        logging.info(f"Processing podcast: {title} (URL: {url}) -> Folder: {subfolder}")
+        try:
+            download_mp3s(url, subfolder, last_n, overwrite, prefix, last_days)
+        except Exception as exc:
+            logging.error(f"Failed to download podcast {title}: {exc}")
+
+
+def download_mp3s(url: str, folder: str, last_n: int, overwrite: bool = True, prefix: Prefix = Prefix.NO_PREFIX, last_days: int = 0):
     """
     Will create a BulkDownloader and download all the mp3s from an URL to the folder
     @param url: Directory/RSS url
@@ -409,13 +522,14 @@ def download_mp3s(url: str, folder: str, last_n: int, overwrite: bool = True, pr
     @param last_n: Only download the last N episodes, all if N = 0
     @param overwrite: Overwrite existing files
     @param prefix: Prefix type for each file
+    @param last_days: Only download episodes from the last N days, all if N = 0
     """
     logging.info('Downloading mp3s from {} to {}'.format(url, folder))
     if overwrite:
         logging.info('Already existing file will be overwritten')
     else:
         logging.info('Already existing file won\'t be overwritten')
-    bulk_downloader = BulkDownloader(url, folder, last_n, overwrite, prefix)
+    bulk_downloader = BulkDownloader(url, folder, last_n, overwrite, prefix, last_days)
     bulk_downloader.download_mp3()
 
 
@@ -445,17 +559,29 @@ def main() -> int:
                         help='Only download the last N episodes, if N=0, download all the episodes')
     parser.add_argument('--prefix', dest='prefix', type=Prefix.from_string, choices=list(Prefix),
                         default=Prefix.NO_PREFIX, help='Prefix for the filename')
+    parser.add_argument('--days', dest='last_days', type=int, default=0,
+                        help='Only download episodes from the last N days. If N=0, download all episodes.')
+    parser.add_argument('--json', dest='json_file', help='Path to a JSON file containing podcasts to download')
     args = parser.parse_args()
 
     if args.version:
         return print_version()
+
+    if args.json_file:
+        base_folder = args.folder if args.folder else "mp3"
+        try:
+            process_json_podcasts(args.json_file, base_folder, int(args.last_n), args.overwrite, args.prefix, args.last_days)
+        except Exception as exc:
+            logging.error(exc)
+            return 1
+        return 0
 
     if not args.url or not args.folder:
         logging.error('You need to set both URL and FOLDER')
         return 1
 
     try:
-        download_mp3s(args.url, args.folder, int(args.last_n), args.overwrite, args.prefix)
+        download_mp3s(args.url, args.folder, int(args.last_n), args.overwrite, args.prefix, args.last_days)
     except Exception as exc:
         logging.error(exc)
         return 1
