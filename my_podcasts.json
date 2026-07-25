@@ -1,0 +1,14 @@
+%%writefile my_podcasts.json
+{
+  "podcasts": [
+    {
+      "title": "Chat with Trader",
+      "url": "https://feeds.megaphone.fm/CWT9205947236"
+    },
+    {
+      "title": "Lanz und Precht",
+      "url": "https://podcasts.apple.com/de/podcast/lanz-precht/id1582828457"
+    }
+  ]
+}
+
