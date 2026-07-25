@@ -1,4 +1,3 @@
-%%writefile my_podcasts.json
 {
   "podcasts": [
     {
