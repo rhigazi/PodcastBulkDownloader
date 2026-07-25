@@ -197,6 +197,99 @@ def test_local_file_not_rss(tmp_directory):
         bdl.download_mp3()
 
 
+def test_resolve_apple_podcast():
+    # Ordinary feed URL should be unchanged
+    feed_url = 'https://feeds.radiokawa.com/podcast_nawak.xml'
+    assert bd.resolve_apple_podcast(feed_url) == feed_url
+
+    # Mock Apple lookup
+    with patch('requests.get') as mock_get:
+        mock_response = mock_get.return_value
+        mock_response.status_code = 200
+        mock_response.json.return_value = {
+            'results': [{'feedUrl': 'https://example.com/resolved_podcast.rss'}]
+        }
+        apple_url = 'https://podcasts.apple.com/podcast/id123456789'
+        resolved = bd.resolve_apple_podcast(apple_url)
+        assert resolved == 'https://example.com/resolved_podcast.rss'
+
+
+def test_last_days_filtering():
+    # Create bulk downloader with last_days set
+    bdl = bd.BulkDownloader('https://feeds.radiokawa.com/podcast_nawak.xml', './dl', last_days=5)
+
+    # Mock _get_episodes_to_download_from_rss
+    now = datetime.datetime.utcnow()
+    ep_recent = bd.Episode('http://example.com/recent.mp3', 'Recent', now - datetime.timedelta(days=2))
+    ep_old = bd.Episode('http://example.com/old.mp3', 'Old', now - datetime.timedelta(days=10))
+
+    with patch.object(bd.BulkDownloader, '_get_episodes_to_download_from_rss', return_value=[ep_recent, ep_old]):
+        # Mocking _is_url and _page_is_rss to avoid actual requests
+        with patch.object(bd.BulkDownloader, '_is_url', return_value=True), \
+             patch('requests.get') as mock_get, \
+             patch.object(bd.BulkDownloader, '_page_is_rss', return_value=True):
+
+            mock_get.return_value.status_code = 200
+            mock_get.return_value.content = b'mock_rss_data'
+
+            eps = bdl.list_mp3()
+            assert len(eps) == 1
+            assert eps[0].title() == 'Recent'
+
+
+def test_process_json_podcasts(tmp_directory):
+    import json
+    # Create mock JSON content
+    json_path = os.path.join(tmp_directory, "podcasts_test.json")
+    test_data = {
+        "podcasts": [
+            {
+                "title": "Podcast Test 1",
+                "url": "https://feeds.radiokawa.com/podcast_nawak.xml",
+                "last_n": 1,
+                "prefix": "DATE"
+            },
+            {
+                "title": "Podcast Test 2",
+                "url": "https://feeds.radiokawa.com/podcast_nawak.xml",
+                "days": 3
+            }
+        ]
+    }
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(test_data, f)
+
+    # We mock download_mp3s to verify we correctly route parameters
+    with patch('src.bulk_downloader.download_mp3s') as mock_download:
+        bd.process_json_podcasts(
+            json_path=json_path,
+            base_folder=tmp_directory,
+            default_last_n=2,
+            default_overwrite=False,
+            default_prefix=bd.Prefix.NO_PREFIX,
+            default_last_days=10
+        )
+
+        assert mock_download.call_count == 2
+        # Check first call: Podcast Test 1 (last_n=1 from JSON, default last_days=10, prefix=DATE from JSON)
+        call1 = mock_download.call_args_list[0]
+        assert call1[0][0] == "https://feeds.radiokawa.com/podcast_nawak.xml"
+        assert call1[0][1] == os.path.normpath(os.path.join(tmp_directory, "Podcast Test 1"))
+        assert call1[0][2] == 1  # last_n
+        assert call1[0][3] is False  # default_overwrite
+        assert call1[0][4] == bd.Prefix.DATE
+        assert call1[0][5] == 10  # default_last_days
+
+        # Check second call: Podcast Test 2 (default last_n=2, last_days=3 from JSON, default prefix)
+        call2 = mock_download.call_args_list[1]
+        assert call2[0][0] == "https://feeds.radiokawa.com/podcast_nawak.xml"
+        assert call2[0][1] == os.path.normpath(os.path.join(tmp_directory, "Podcast Test 2"))
+        assert call2[0][2] == 2  # default_last_n
+        assert call2[0][3] is False  # default_overwrite
+        assert call2[0][4] == bd.Prefix.NO_PREFIX
+        assert call2[0][5] == 3  # last_days
+
+
 def test_local_file_not_found(tmp_directory):
     local_file = os.path.join(TEST_DATA, "unknw.xml")
     bdl = bd.BulkDownloader(local_file, tmp_directory)
